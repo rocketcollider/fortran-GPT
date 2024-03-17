@@ -9,10 +9,11 @@ module structured_network
     class(Loss), allocatable :: cost_function
     integer :: outputs
   contains
-    procedure :: run => interpret1,interpret2
+    generic :: run => interpret2, interpret1
+    procedure :: interpret2 => interpret2
+    procedure :: interpret1 => interpret1
     procedure :: batch_train => batch_train2
     procedure :: initiate => random_network
-    final :: destructor
   end type network
 
   interface network
@@ -22,11 +23,6 @@ module structured_network
   end interface network
 
 contains
-
-  subroutine destructor(this)
-    type(network) :: this
-    print *, 'here network be destructed'
-  end subroutine destructor
 
   subroutine random_network(this)
     class(network), intent(inout) :: this
@@ -41,7 +37,6 @@ contains
     type(network) :: out
     out%outputs = layers(size(layers))%outputs
     allocate(out%layers, source=layers)
-    out%layers = layers
 
   end function network_from_layers
 
@@ -52,9 +47,7 @@ contains
     out%outputs = layers(size(layers))%outputs
     allocate(out%cost_function, source=cost)
 
-    allocate(out%layers, mold=layers)
-    out%layers = layers
-    print *, 'here were started?'
+    allocate(out%layers, source=layers)
   end function network_from_layers_and_loss
 
   function network_from_array_and_layers_and_loss(shapes, layers, cost) result (out)
@@ -64,9 +57,9 @@ contains
     type(network) :: out
     integer :: i
     allocate(out%cost_function, source=cost)
+    out%outputs = shapes(size(shapes))
 
-    allocate(out%layers, mold=layers)
-    out%layers = layers
+    allocate(out%layers, source=layers)
     do i=1,size(layers)
       call out%layers(i)%set_layout(shapes(i), shapes(i+1))
     end do
@@ -87,9 +80,10 @@ contains
     real, allocatable :: out(:,:)
     integer :: i
 
-    out = signals
+    allocate(out, source=signals)
 
     do i=1,size(this%layers)
+
       out=this%layers(i)%run(out)
     end do
   end function interpret2
@@ -100,31 +94,33 @@ contains
     real :: alpha, loss!(this%layers(size(this%layers))%outputs, size(signals,2))
     real, allocatable :: tmp(:,:)
     integer :: i
-    print *, 'inside batch train', allocated(tmp), shape(signals)
     allocate(tmp, source=signals)
-    !allocate(tmp(size(signals,1),size(signals,2)))
 
-    print *, 'after assign, shapes: ', shape(this%layers), '(should be rank1) ', shape(tmp)
     do i=1,size(this%layers)
-      print *, 'before forward train'
-      tmp = this%layers(i)%train_forward(tmp)
-      print *, 'after forward train'
+      block
+        real :: carrier(this%layers(i)%outputs, size(answers,2))
+        carrier = this%layers(i)%train_forward(tmp)
+        deallocate(tmp)
+        allocate(tmp, source=carrier)
+      end block
     end do
-    loss = sum(this%cost_function%eval(tmp, answers))
-    tmp = this%cost_function%grad(tmp, answers)
+    loss = sum(this%cost_function%eval(tmp, answers))/size(signals,2)
+    block
+      real :: inversion(size(tmp,1), size(tmp,2))
+      inversion = this%cost_function%grad(tmp, answers)
+      deallocate(tmp)
+      allocate(tmp, source=inversion)
+    end block
 
     do i=size(this%layers),1,-1
-      print *,"before layers train"
-      tmp = this%layers(i)%train_backward(tmp, alpha)
-      print *, 'after layers train'
-      !block
-      !  real :: prev_errors(2*this%layers(i)%inputs,2*size(answers,2))
-        !tmp = this%layers(i)%train_backward(tmp, alpha)
-        !deallocate(tmp)
-        !allocate(tmp, source=prev_errors)
-      !end block
+      block
+        real :: prev_error(this%layers(i)%inputs, size(answers,2))
+        prev_error = this%layers(i)%train_backward(tmp, alpha)
+        deallocate(tmp)
+        allocate(tmp, source=prev_error)
+      end block
     end do
-    !deallocate(tmp)
+    deallocate(tmp)
   end function batch_train2
 
 end module structured_network

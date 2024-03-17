@@ -8,10 +8,8 @@ module network_layers
   type, abstract :: layer
     integer :: inputs, outputs
     class(Activation), allocatable :: func
-    real, allocatable :: signals(:,:), derivatives(:,:), weights(:,:)
+    real, allocatable :: weights(:,:), signals(:,:), derivatives(:,:)
   contains
-    generic :: assignment(=) => copy_layer
-    procedure :: copy_layer => copy_layer
     procedure :: set_layout => set_weights_size
     procedure :: random_weights => set_weights_random
     procedure(layer_pass_signals), deferred :: run
@@ -71,18 +69,6 @@ module network_layers
 
 contains
 
-  subroutine copy_layer(new, old)
-    class(layer), intent(out) :: new
-    class(layer), intent(in) :: old
-    if (allocated(old%func)) allocate(new%func, source=old%func)
-
-    if (allocated(old%weights)) then
-      new%inputs = old%inputs
-      new%outputs = old%outputs
-      allocate(new%weights, source=old%weights)
-    end if
-  end subroutine
-
   subroutine set_biased_layout(this, inputs, outputs)
     class(bias_layer), intent(inout) :: this
     integer, intent(in) :: inputs, outputs
@@ -123,9 +109,9 @@ contains
   function interpret_biased_layer(this, signals) result (out)
     class(bias_layer), intent(in) :: this
     real, intent(in) :: signals(:,:)
-    real :: out(this%outputs,size(signals,2)), wrapper(size(signals,1)+1,size(signals,2))
-    wrapper(size(signals,1)+1,:)=1
-    wrapper(1:size(signals,1),:)=signals
+    real :: out(this%outputs,size(signals,2)), wrapper(this%inputs+1,size(signals,2))
+    wrapper(this%inputs+1,:)=1
+    wrapper(: this%inputs,:)=signals
     out = this%func%activate(matmul(this%weights, wrapper))
   end function interpret_biased_layer
 
@@ -136,29 +122,22 @@ contains
 
     if (allocated(this%signals)) deallocate(this%signals)
     allocate(this%signals(this%inputs+1,size(signals,2)))
-    print *, 'after allocate'
-    this%signals(:this%inputs, :) = signals
-    !this%signals(this%inputs+1,size(signals,2)) = signals
     this%signals(this%inputs+1, :)=1
+    this%signals(: this%inputs, :)=signals
 
-    ! re-using out as tmp-store
-    print *, "weights and signals: ", shape(this%weights), shape(this%signals), allocated(this%weights), allocated(this%signals)
     out = matmul(   &
       this%weights, &
       this%signals  &
     )
     if (allocated(this%derivatives)) deallocate(this%derivatives)
     allocate(this%derivatives, mold=out)!source = this%func%derivative(out))
-    print *, 'after allocate'
     block
       integer :: i
-      do concurrent(i=1:size(out,2))
+      do concurrent(i=1:size(signals,2))
         this%derivatives(:,i)=this%func%derivative(out(:,i))
         out(:,i) = this%func%activate(out(:,i))
       end do
     end block
-
-    !out = this%func%activate(out)
   end function train_forward_biased_layer
 
   function gradient_biased_layer(this, error, corrections) result (prev_error)
@@ -191,18 +170,19 @@ contains
   function train_backward_biased_layer(this, error, alpha) result (prev_error)
     class(bias_layer), intent(inout)::this
     real,intent(in) :: error(:,:), alpha
-    real :: prev_error(this%inputs, size(error,2)),corrections(this%outputs, this%inputs+1)
-    print *, allocated(this%signals), allocated(this%derivatives)
+    real :: prev_error(this%inputs, size(error,2))!,corrections(this%outputs, this%inputs+1)
 
-    !prev_error = basic_SGD(this,error,alpha)
-    prev_error=this%calc_grad(error, corrections)
-    this%weights = this%weights - (corrections * alpha)
+    prev_error = basic_SGD(this,error,alpha)
+    !prev_error=this%calc_grad(error, corrections)
+    !this%weights = this%weights - (corrections * alpha)
+    deallocate(this%signals)
+    deallocate(this%derivatives)
   end function train_backward_biased_layer
 
   function basic_SGD(this, error, alpha) result (prev_error)
     class(layer), intent(inout)::this
     real, intent(in) :: error(:,:), alpha ! error needs to be this%outputs long in 1st dim
-    real :: corrections(size(this%weights,1),size(this%weights,2)), prev_error(size(this%weights,2), size(error,2))
+    real :: corrections(size(this%weights,1),size(this%weights,2)), prev_error(this%inputs, size(error,2))
 
     prev_error=this%calc_grad(error, corrections)
     this%weights = this%weights - corrections * alpha

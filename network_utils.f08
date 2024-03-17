@@ -68,13 +68,13 @@ module network_utils
   end type Loss
 
   abstract interface
-    pure elemental function loss_function(desired, compare) result (out)
-      real, intent(in):: desired, compare
+    pure elemental function loss_function(compare, desired) result (out)
+      real, intent(in):: compare, desired
       real :: out
     end function loss_function
 
-    pure elemental function loss_gradient(desired, compare) result (out)
-      real, intent(in):: desired, compare
+    pure elemental function loss_gradient(compare, desired) result (out)
+      real, intent(in):: compare, desired
       real :: out
     end function loss_gradient
   end interface
@@ -100,26 +100,26 @@ contains
     out = reshape(this%activate2(reshape(signal, [size(signal),1])), [size(signal)])
   end function generic_smooth_eval
 
-  pure elemental function eval_squared_loss(desired, compare) result (out)
-    real, intent(in) :: desired, compare
+  pure elemental function eval_squared_loss(compare, desired) result (out)
+    real, intent(in) :: compare, desired
     real :: out
-    out = ( desired -compare )**2/2.0
+    out = ( desired - compare )**2/2.0
   end function eval_squared_loss
 
-  pure elemental function gradient_squared_loss(desired, compare) result (out)
-    real, intent(in) :: desired, compare
+  pure elemental function gradient_squared_loss(compare, desired) result (out)
+    real, intent(in) :: compare, desired
     real :: out
-    out = compare-desired
+    out = compare - desired
   end function gradient_squared_loss
 
-  pure elemental function eval_log_loss(desired,compare) result (out)
-    real, intent(in) :: desired, compare
+  pure elemental function eval_log_loss(compare, desired) result (out)
+    real, intent(in) :: compare, desired
     real :: out
     out = - desired * log(compare)
   end function eval_log_loss
 
-  pure elemental function gradient_log_loss(desired,compare) result (out)
-    real, intent(in) :: desired, compare
+  pure elemental function gradient_log_loss(compare, desired) result (out)
+    real, intent(in) :: compare, desired
     real :: out
     out = - desired/compare
   end function gradient_log_loss
@@ -173,7 +173,7 @@ contains
     real, intent(in) :: signal(:,:)
     real, dimension(size(signal,1),size(signal,2)) :: out, base
     base = exp(signal)
-    out = base / spread(sum(base,1), 2, size(signal,2))
+    out = base / spread(sum(base,1), 1, size(signal,1))
   end function a_softmax_r
 
 
@@ -276,9 +276,9 @@ contains
             isorted(n+k) = iunsorted(n+bin+v)
             v = v+1
 
-            if (v > bin .or. v+bin+n>last)then! .and. u <= 2**m) then ! .and. k+1 < 2**(m+1) is _hopefully_ unnecessarry, bc always same as k+1 < 2**(m+1)
-              sorted(n+k+1:n+2*bin) = unsorted(n+u:n+bin)
-              isorted(n+k+1:n+2*bin) = iunsorted(n+u:n+bin)
+            if (v > bin .or. v+bin+n>last .and. u <= bin) then ! .and. k+1 < 2**(m+1) is _hopefully_ unnecessarry, bc always same as k+1 < 2**(m+1)
+              sorted(n+k+1:min(n+2*bin, last)) = unsorted(n+u:n+bin)
+              isorted(n+k+1:min(n+2*bin, last)) = iunsorted(n+u:n+bin)
               exit
             end if
           else
@@ -335,7 +335,6 @@ contains
     do concurrent (i=1:size(data,2))
       tri(i,1:i) = (1.0/i)
     end do
-    print *, tri
     out = transpose(matmul(tri,transpose(data)))
   end function rolling_average2
 

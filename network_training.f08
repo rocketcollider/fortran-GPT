@@ -8,11 +8,11 @@ program network_training
 
   block ! binary-test
     type(network) :: net
-    real, save :: answers(8,256),data(256,256)
+    real :: answers(8,256),data(256,256)
     real ::  cost
     integer :: i(8), index, run, answer
 
-    type(identity), target :: ident
+    type(identity) :: ident
     type(bias_layer) :: simple_lyr
     type(SquaredLoss):: sqloss
     ! type(ReLU), target :: ReLUf
@@ -42,7 +42,7 @@ program network_training
       end do
     end associate
 
-    do run=1,1!0
+    do run=1,10
       simple_lyr = bias_layer(ident, 256,8)
       net = network([simple_lyr], sqloss)
       !net = network([256,8],[wrap(ident), wrap(ident)])
@@ -76,9 +76,8 @@ program network_training
   block ! simple perceptron
     real, dimension(1,1001) :: data, answers
     type(network) :: net
-    type(identity), target :: ident
-    type(ReLU), target :: ReLUf
-    type(bias_layer) :: ReLuLay, IdenLay
+    type(identity) :: ident
+    type(ReLU) :: ReLUf
     type(SquaredLoss) :: sqLoss
     integer :: i
     real :: cost
@@ -88,17 +87,17 @@ program network_training
       answers(1,i)= data(1,i)**2
     end do
     print *, data(1,1), answers(1,1)
-    ReLuLay = bias_layer(ReLUf)
-    IdenLay = bias_layer(ident)
-    net = network([1,5,1], [ReLuLay, IdenLay], sqLoss)
-    print *, 'past network definition'
-    !net = network([1,5,1], [wrap(ident), wrap(ReLUf), wrap(ident)])
-    call net%initiate()
-    do i=1,10!0
-      cost = net%batch_train(data, answers, 0.3)
-      print *, 'past batch train'
+    net = network([1,5,1], [bias_layer(ReLUf), bias_layer(ident)], sqLoss)
+    !call net%initiate()
+    net%layers(1)%weights=0.1
+    net%layers(2)%weights=0.5
+    print *, sum(data)/size(data)
+    do i=1,10
+      cost = net%batch_train(data, answers, 0.6)
+      print *, cost
     end do
-    !print *, net%run([-2.]),net%run([-1.]),net%run([0.]),net%run([1.]),net%run([2.])
+    print *, net%run([-2.]),net%run([-1.]),net%run([0.]),net%run([1.]),net%run([2.])
+
   end block
 
   block ! ingest training data
@@ -147,7 +146,7 @@ program network_training
 
       test = 0
 
-      do i=1,size(out-1)
+      do i=1,size(out)-1
         test(out(i)+1, out(i+1)+1) = (test(out(i)+1, out(i +1) +1) +1) !brackets just for alliteration
       end do
       print *, names%dictionary

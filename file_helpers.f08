@@ -42,7 +42,7 @@ contains
     character(len=:), allocatable :: dictionary
     integer :: iostat, size_read,i, idx, dic_len, list_pos
     character(len=80) :: buffer
-    integer, allocatable :: intlist(:), tmp(:)
+    integer, allocatable :: intlist(:)
 
     dic_len=0
     allocate(intlist(this%buffer_len))
@@ -87,10 +87,13 @@ contains
 
         list_pos = list_pos+1
         if (list_pos+1>size(intlist,1)) then
-          allocate(tmp, source=intlist)
-          deallocate(intlist)
-          allocate(intlist(2*size(tmp,1)), source=tmp)
-          deallocate(tmp)
+          block
+            integer :: tmp(size(intlist))
+            tmp=intlist
+            deallocate(intlist)
+            allocate(intlist(2*size(tmp,1)))
+            intlist(:size(tmp)) = tmp
+          end block
         endif
 
       end do
