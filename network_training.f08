@@ -46,9 +46,7 @@ program network_training
       simple_lyr = bias_layer(ident, 256,8)
       net = network([simple_lyr], sqloss)
       !net = network([256,8],[wrap(ident), wrap(ident)])
-      print *, allocated(net%layers(1)%weights)
-      net%layers(1)%weights = 0.1
-      print *, net%layers(1)%weights(8,257), net%layers(1)%weights(1,1)
+      call net%layers(1)%fixed_init( 0.1 )
       !call net%initiate()
       answer = 1000
       do index=1,50
@@ -89,8 +87,8 @@ program network_training
     print *, data(1,1), answers(1,1)
     net = network([1,5,1], [bias_layer(ReLUf), bias_layer(ident)], sqLoss)
     !call net%initiate()
-    net%layers(1)%weights=0.1
-    net%layers(2)%weights=0.5
+    call net%layers(1)%fixed_init(0.1)
+    call net%layers(2)%fixed_init(0.5)
     print *, sum(data)/size(data)
     do i=1,10
       cost = net%batch_train(data, answers, 0.6)

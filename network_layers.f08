@@ -8,15 +8,28 @@ module network_layers
   type, abstract :: layer
     integer :: inputs, outputs
     class(Activation), allocatable :: func
-    real, allocatable :: weights(:,:), signals(:,:), derivatives(:,:)
+    real, allocatable :: signals(:,:)
   contains
-    procedure :: set_layout => set_weights_size
-    procedure :: random_weights => set_weights_random
     procedure(layer_pass_signals), deferred :: run
     procedure(layer_train_forward), deferred :: train_forward
-    procedure(layer_calc_gradient), deferred :: calc_grad
     procedure(layer_train_backward), deferred :: train_backward
+    procedure(layer_random_init), deferred :: random_init
+    generic :: fixed_init => f_init1, f_init2
+    procedure(layer_finit1), deferred :: f_init1
+    procedure(layer_finit2), deferred :: f_init2
   end type layer
+
+  type, abstract, extends(layer) :: connectom
+    real, allocatable :: weights(:,:), derivatives(:,:)
+  contains
+    procedure :: set_layout => set_weights_size
+    procedure :: random_init => set_weights_random
+    procedure :: f_init1 => single_value_init
+    procedure :: f_init2 => complete_init
+    procedure :: calc_grad => gradient_connectom
+    procedure :: internal_signal_transport => connectom_signal_transport
+    procedure :: train_backward => train_backward_connectom
+  end type connectom
 
 !========================== interface declaration ==========================
 
@@ -42,25 +55,40 @@ module network_layers
       real :: out(this%inputs, size(error,2))
     end function layer_train_backward
 
-    function layer_calc_gradient(this, error, corrections) result (out)
+    subroutine layer_random_init(this)
       import layer
-      class(layer), intent(in) :: this
-      real, intent(in) :: error(:,:) ! 1st dim this%outputs long
-      real, intent(out) :: corrections(size(this%weights,1), size(this%weights,2))
-      real :: out(this%inputs, size(error,2))
-    end function layer_calc_gradient
+      class(layer), intent(inout) :: this
+    end subroutine layer_random_init
+
+    subroutine layer_finit1(this, value)
+      import layer
+      class(layer), intent(inout) :: this
+      real, intent(in) :: value
+    end subroutine layer_finit1
+
+    subroutine layer_finit2(this, values)
+      import layer
+      class(layer), intent(inout) :: this
+      real, intent(in) :: values(:,:)
+    end subroutine layer_finit2
+
   end interface
 
 !========================== useful definitions ==========================
 
-  type, extends(layer) :: bias_layer
+  type, extends(connectom) :: bias_layer
   contains
     procedure :: set_layout => set_biased_layout
     procedure :: train_forward => train_forward_biased_layer
-    procedure :: train_backward => train_backward_biased_layer
-    procedure :: calc_grad => gradient_biased_layer
     procedure :: run => interpret_biased_layer
   end type bias_layer
+
+  type, extends(connectom) :: linear_layer
+  contains
+    procedure :: set_layout => set_linear_layout
+    procedure :: train_forward => train_forward_linear_layer
+    procedure :: run => interpret_linear_layer
+  end type linear_layer
 
   interface bias_layer
     module procedure bias_layer_from_activation
@@ -68,6 +96,18 @@ module network_layers
   end interface bias_layer
 
 contains
+
+  subroutine single_value_init(this, value)
+    class(connectom), intent(inout) :: this
+    real, intent(in) :: value
+    this%weights = value
+  end subroutine single_value_init
+
+  subroutine complete_init(this, values)
+    class(connectom), intent(inout) :: this
+    real, intent(in) :: values (:,:)
+    this%weights = values
+  end subroutine complete_init
 
   subroutine set_biased_layout(this, inputs, outputs)
     class(bias_layer), intent(inout) :: this
@@ -78,8 +118,17 @@ contains
     allocate(this%weights(outputs,inputs+1))
   end subroutine set_biased_layout
 
+  subroutine set_linear_layout(this, inputs, outputs)
+    class(linear_layer), intent(inout) :: this
+    integer, intent(in) :: inputs, outputs
+    this%inputs = inputs
+    this%outputs = outputs
+    if (allocated(this%weights)) deallocate(this%weights)
+    allocate(this%weights(outputs,inputs))
+  end subroutine set_linear_layout
+
   subroutine set_weights_size(this, inputs, outputs)
-    class(layer), intent(inout) :: this ! HAS to be inout, or other params are lost !!
+    class(connectom), intent(inout) :: this ! HAS to be inout, or other params are lost !!
     integer, intent(in) :: inputs, outputs
     this%inputs = inputs
     this%outputs = outputs
@@ -101,8 +150,14 @@ contains
     allocate(out%func, source=func)
   end function bias_layer_from_activation_and_size
 
+  function bias_layer_from_size(inputs, outputs) result (out)
+    type(bias_layer) :: out
+    integer, intent(in) :: inputs, outputs
+    call out%set_layout(inputs, outputs)
+  end function bias_layer_from_size
+
   subroutine set_weights_random(this)
-    class(layer) :: this
+    class(connectom), intent(inout) :: this
     call random_number(this%weights)
   end subroutine set_weights_random
 
@@ -112,8 +167,42 @@ contains
     real :: out(this%outputs,size(signals,2)), wrapper(this%inputs+1,size(signals,2))
     wrapper(this%inputs+1,:)=1
     wrapper(: this%inputs,:)=signals
-    out = this%func%activate(matmul(this%weights, wrapper))
+    out = matmul(this%weights, wrapper)
+    if (allocated(this%func)) then
+      out = this%func%activate(out)
+    end if
   end function interpret_biased_layer
+
+  function interpret_linear_layer(this, signals) result (out)
+    class(linear_layer), intent(in) :: this
+    real, intent(in) :: signals(:,:)
+    real :: out(this%outputs,size(signals,2))
+    out = matmul(this%weights, signals)
+    if (allocated(this%func)) then
+      out = this%func%activate(out)
+    end if
+  end function interpret_linear_layer
+
+  function connectom_signal_transport(this) result(out)
+    class(connectom), intent(inout)::this
+    real :: out(this%outputs, size(this%signals,2))
+    out = matmul(   &
+      this%weights, &
+      this%signals  &
+    )
+
+    if (allocated(this%func)) then
+      if (allocated(this%derivatives)) deallocate(this%derivatives)
+      allocate(this%derivatives, mold=out)!source = this%func%derivative(out))
+      block
+        integer :: i
+        do concurrent(i=1:size(this%signals,2))
+          this%derivatives(:,i)=this%func%derivative(out(:,i))
+          out(:,i) = this%func%activate(out(:,i))
+        end do
+      end block
+    end if
+  end function connectom_signal_transport
 
   function train_forward_biased_layer(this, signals) result (out)
     class(bias_layer), intent(inout) :: this
@@ -125,38 +214,46 @@ contains
     this%signals(this%inputs+1, :)=1
     this%signals(: this%inputs, :)=signals
 
-    out = matmul(   &
-      this%weights, &
-      this%signals  &
-    )
-    if (allocated(this%derivatives)) deallocate(this%derivatives)
-    allocate(this%derivatives, mold=out)!source = this%func%derivative(out))
-    block
-      integer :: i
-      do concurrent(i=1:size(signals,2))
-        this%derivatives(:,i)=this%func%derivative(out(:,i))
-        out(:,i) = this%func%activate(out(:,i))
-      end do
-    end block
+    out = this%internal_signal_transport()
   end function train_forward_biased_layer
 
-  function gradient_biased_layer(this, error, corrections) result (prev_error)
-    class(bias_layer), intent(in) :: this
+  function train_forward_linear_layer(this, signals) result (out)
+    class(linear_layer), intent(inout) :: this
+    real, intent(in) :: signals(:, :) ! 1st dim needs to be this%inputs long!
+    real :: out(this%outputs,size(signals,2))
+
+    if (allocated(this%signals)) deallocate(this%signals)
+    allocate(this%signals, source=signals)
+
+    out = this%internal_signal_transport()
+  end function train_forward_linear_layer
+
+  function gradient_connectom(this, error, corrections) result (prev_error)
+    class(connectom), intent(in) :: this
     real, intent(in) :: error(:,:) ! 1st dim needs to be this%outputs long!
     real :: prev_error(this%inputs, size(error,2))
     real, intent(out) :: corrections(size(this%weights,1), size(this%weights,2))
 
-    if (.not. allocated(this%signals) .or. .not. allocated(this%derivatives)) then
+    if (.not. allocated(this%signals) .or. (.not. allocated(this%derivatives) .and. allocated(this%func))) then
       print *, "THIS NEEDS SIGNALS AND DERIVATIVES! RUN TRAIN_FORWARD FIRST!!!"
       stop
     end if
 
-    prev_error = matmul(                         &
-      transpose(                                 &
-        this%weights(:,1:size(this%weights,2)-1) &
-      ),                                         &
-      this%derivatives * error                   &
-    )
+    block
+      real :: derivative_times_error(size(error,1), size(error,2))
+      if(allocated(this%func)) then
+        derivative_times_error = this%derivatives * error
+      else
+        derivative_times_error = error
+      end if
+
+      prev_error = matmul(                         &
+        transpose(                                 &
+          this%weights(:,1:size(this%weights,2)-1) &
+        ),                                         &
+        derivative_times_error                     &
+      )
+    end block
 
     corrections = matmul( &
       error,              &
@@ -165,22 +262,20 @@ contains
       )                   &
     ) / size(error,2)
 
-  end function gradient_biased_layer
+  end function gradient_connectom
 
-  function train_backward_biased_layer(this, error, alpha) result (prev_error)
-    class(bias_layer), intent(inout)::this
+  function train_backward_connectom(this, error, alpha) result (prev_error)
+    class(connectom), intent(inout)::this
     real,intent(in) :: error(:,:), alpha
     real :: prev_error(this%inputs, size(error,2))!,corrections(this%outputs, this%inputs+1)
 
     prev_error = basic_SGD(this,error,alpha)
-    !prev_error=this%calc_grad(error, corrections)
-    !this%weights = this%weights - (corrections * alpha)
     deallocate(this%signals)
     deallocate(this%derivatives)
-  end function train_backward_biased_layer
+  end function train_backward_connectom
 
   function basic_SGD(this, error, alpha) result (prev_error)
-    class(layer), intent(inout)::this
+    class(connectom), intent(inout)::this
     real, intent(in) :: error(:,:), alpha ! error needs to be this%outputs long in 1st dim
     real :: corrections(size(this%weights,1),size(this%weights,2)), prev_error(this%inputs, size(error,2))
 

@@ -28,7 +28,7 @@ contains
     class(network), intent(inout) :: this
     integer :: i
     do i=1,size(this%layers)
-      call this%layers(i)%random_weights
+      call this%layers(i)%random_init
     end do
   end subroutine random_network
 
@@ -51,7 +51,7 @@ contains
   end function network_from_layers_and_loss
 
   function network_from_array_and_layers_and_loss(shapes, layers, cost) result (out)
-    class(layer), intent(in) :: layers(:)
+    class(connectom), intent(in) :: layers(:)
     class(Loss), intent(in) :: cost
     integer, intent(in) :: shapes(size(layers)+1)
     type(network) :: out
@@ -61,7 +61,10 @@ contains
 
     allocate(out%layers, source=layers)
     do i=1,size(layers)
-      call out%layers(i)%set_layout(shapes(i), shapes(i+1))
+      select type (lyr => out%layers(i))
+      class is (connectom)
+        call lyr%set_layout(shapes(i), shapes(i+1))
+      end select
     end do
 
   end function network_from_array_and_layers_and_loss
