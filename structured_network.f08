@@ -13,6 +13,8 @@ module structured_network
     procedure :: interpret2 => interpret2
     procedure :: interpret1 => interpret1
     procedure :: batch_train => batch_train2
+    procedure :: forward => train_forward2
+    procedure :: backward => train_backward2
     procedure :: initiate => random_network
   end type network
 
@@ -91,22 +93,47 @@ contains
     end do
   end function interpret2
 
+  function train_forward2(this, signals) result (out)
+    class(network), intent(inout) :: this
+    real, intent(in) :: signals(:,:)
+    real, allocatable :: out(:,:)
+    integer :: i
+    allocate(out, source=signals)
+
+    do i=1,size(this%layers)
+      block
+        real :: carrier(this%layers(i)%outputs, size(signals,2))
+        carrier = this%layers(i)%train_forward(out)
+        deallocate(out)
+        allocate(out, source=carrier)
+      end block
+    end do
+  end function train_forward2
+
+  subroutine train_backward2(this, errors, alpha)
+    class(network), intent(inout) :: this
+    real, intent(inout), allocatable :: errors(:,:)
+    real, intent(in) :: alpha
+    integer :: i
+
+    do i=size(this%layers),1,-1
+      block
+        real :: prev_error(this%layers(i)%inputs, size(errors,2))
+        prev_error = this%layers(i)%train_backward(errors, alpha)
+        deallocate(errors)
+        allocate(errors, source=prev_error)
+      end block
+    end do
+  end subroutine train_backward2
+
   function batch_train2(this, signals, answers, alpha) result (loss)
     class(network), intent(inout) :: this
     real, intent(in) :: signals(:,:), answers(:,:)
     real :: alpha, loss!(this%layers(size(this%layers))%outputs, size(signals,2))
     real, allocatable :: tmp(:,:)
-    integer :: i
-    allocate(tmp, source=signals)
 
-    do i=1,size(this%layers)
-      block
-        real :: carrier(this%layers(i)%outputs, size(answers,2))
-        carrier = this%layers(i)%train_forward(tmp)
-        deallocate(tmp)
-        allocate(tmp, source=carrier)
-      end block
-    end do
+    allocate(tmp, source=this%forward(signals))
+
     loss = sum(this%cost_function%eval(tmp, answers))/size(signals,2)
     block
       real :: inversion(size(tmp,1), size(tmp,2))
@@ -115,14 +142,8 @@ contains
       allocate(tmp, source=inversion)
     end block
 
-    do i=size(this%layers),1,-1
-      block
-        real :: prev_error(this%layers(i)%inputs, size(answers,2))
-        prev_error = this%layers(i)%train_backward(tmp, alpha)
-        deallocate(tmp)
-        allocate(tmp, source=prev_error)
-      end block
-    end do
+    call this%backward(tmp, alpha)
+
     deallocate(tmp)
   end function batch_train2
 
