@@ -16,7 +16,7 @@ module network_layers
     procedure(layer_random_init), deferred :: random_init
     generic :: fixed_init => f_init1, f_init2
     procedure(layer_finit1), deferred :: f_init1
-    procedure(layer_finit2), deferred :: f_init2
+    procedure :: f_init2 => unimplemented_fixed_init2
   end type layer
 
   type, abstract, extends(layer) :: connectom
@@ -34,7 +34,7 @@ module network_layers
 !========================== interface declaration ==========================
 
   abstract interface
-    function layer_pass_signals(this,signals) result (out)
+    pure function layer_pass_signals(this,signals) result (out)
     import layer
       class(layer), intent(in) :: this
       real, intent(in) :: signals(:,:) ! 1st dim this%inputs long
@@ -60,17 +60,11 @@ module network_layers
       class(layer), intent(inout) :: this
     end subroutine layer_random_init
 
-    subroutine layer_finit1(this, value)
+    pure subroutine layer_finit1(this, value)
       import layer
       class(layer), intent(inout) :: this
       real, intent(in) :: value
     end subroutine layer_finit1
-
-    subroutine layer_finit2(this, values)
-      import layer
-      class(layer), intent(inout) :: this
-      real, intent(in) :: values(:,:)
-    end subroutine layer_finit2
 
   end interface
 
@@ -97,7 +91,13 @@ module network_layers
 
 contains
 
-  subroutine single_value_init(this, value)
+  subroutine unimplemented_fixed_init2(this, values)
+    class(layer), intent(inout) :: this
+    real, intent(in) :: values(:,:)
+    stop
+  end subroutine unimplemented_fixed_init2
+
+  pure subroutine single_value_init(this, value)
     class(connectom), intent(inout) :: this
     real, intent(in) :: value
     this%weights = value
@@ -161,7 +161,7 @@ contains
     call random_number(this%weights)
   end subroutine set_weights_random
 
-  function interpret_biased_layer(this, signals) result (out)
+  pure function interpret_biased_layer(this, signals) result (out)
     class(bias_layer), intent(in) :: this
     real, intent(in) :: signals(:,:)
     real :: out(this%outputs,size(signals,2)), wrapper(this%inputs+1,size(signals,2))
@@ -173,7 +173,7 @@ contains
     end if
   end function interpret_biased_layer
 
-  function interpret_linear_layer(this, signals) result (out)
+  pure function interpret_linear_layer(this, signals) result (out)
     class(linear_layer), intent(in) :: this
     real, intent(in) :: signals(:,:)
     real :: out(this%outputs,size(signals,2))

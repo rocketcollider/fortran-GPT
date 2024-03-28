@@ -10,7 +10,7 @@ module structured_network
     integer :: outputs
   contains
     generic :: run => interpret2, interpret1
-    procedure :: interpret2 => interpret2
+    procedure :: interpret2 => pure_interpret2
     procedure :: interpret1 => interpret1
     procedure :: batch_train => batch_train2
     procedure :: forward => train_forward2
@@ -78,7 +78,7 @@ contains
     out = reshape(this%interpret2(reshape(signals, [size(signals),1])), [this%outputs])
   end function interpret1
 
-  function interpret2(this, signals) result (out)
+  function impure_interpret2(this, signals) result (out)
     class(network), intent(in) :: this
     real, intent(in) :: signals(:,:)
     !real :: out(this%layers(size(this%layers))%outputs, size(signals,2))
@@ -88,10 +88,31 @@ contains
     allocate(out, source=signals)
 
     do i=1,size(this%layers)
-
       out=this%layers(i)%run(out)
     end do
-  end function interpret2
+  end function impure_interpret2
+
+  pure function pure_interpret2(this, signals) result (out)
+    class(network), intent(in) :: this
+    real, intent(in) :: signals(:,:)
+    real :: out(this%outputs,size(signals,2))
+    real, pointer :: tmp(:,:)
+    real, target :: input(size(signals,1),size(signals,2))
+    integer :: i
+
+    input = signals
+    tmp => input
+
+    do i=1,size(this%layers)
+      block
+        real, target :: node_values(this%layers(i)%outputs, size(signals,2))
+        node_values = this%layers(i)%run(tmp)
+        tmp => node_values
+      end block
+    end do
+
+    out = tmp
+  end function pure_interpret2
 
   function train_forward2(this, signals) result (out)
     class(network), intent(inout) :: this
