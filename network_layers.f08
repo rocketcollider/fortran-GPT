@@ -8,7 +8,7 @@ module network_layers
   type, abstract :: layer
     integer :: inputs, outputs
     class(Activation), allocatable :: func
-    real, allocatable :: signals(:,:)
+    real, allocatable :: signals(:,:), derivatives(:,:)
   contains
     procedure(layer_pass_signals), deferred :: run
     procedure(layer_train_forward), deferred :: train_forward
@@ -20,7 +20,7 @@ module network_layers
   end type layer
 
   type, abstract, extends(layer) :: connectom
-    real, allocatable :: weights(:,:), derivatives(:,:)
+    real, allocatable :: weights(:,:)
   contains
     procedure :: set_layout => set_weights_size
     procedure :: random_init => set_weights_random
@@ -249,18 +249,18 @@ contains
 
       prev_error = matmul(                         &
         transpose(                                 &
-          this%weights(:,1:size(this%weights,2)-1) &
+          this%weights(:,1:this%inputs) &
         ),                                         &
         derivative_times_error                     &
       )
-    end block
 
-    corrections = matmul( &
-      error,              &
-      transpose(          &
-        this%signals      &
-      )                   &
-    ) / size(error,2)
+      corrections = matmul( &
+        derivative_times_error,              &
+        transpose(          &
+          this%signals      &
+        )                   &
+      ) / size(error,2)
+    end block
 
   end function gradient_connectom
 
