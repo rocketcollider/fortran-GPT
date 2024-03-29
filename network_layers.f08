@@ -77,6 +77,12 @@ module network_layers
     procedure :: run => interpret_biased_layer
   end type bias_layer
 
+  interface bias_layer
+    module procedure bias_layer_from_activation
+    module procedure bias_layer_from_activation_and_size
+    module procedure bias_layer_from_size
+  end interface bias_layer
+
   type, extends(connectom) :: linear_layer
   contains
     procedure :: set_layout => set_linear_layout
@@ -84,10 +90,11 @@ module network_layers
     procedure :: run => interpret_linear_layer
   end type linear_layer
 
-  interface bias_layer
-    module procedure bias_layer_from_activation
-    module procedure bias_layer_from_activation_and_size
-  end interface bias_layer
+  interface linear_layer
+    module procedure linear_layer_from_activation
+    module procedure linear_layer_from_activation_and_size
+    module procedure linear_layer_from_size
+  end interface linear_layer
 
 contains
 
@@ -156,6 +163,26 @@ contains
     call out%set_layout(inputs, outputs)
   end function bias_layer_from_size
 
+  function linear_layer_from_activation(func) result (out)
+    class(Activation), intent(in) :: func
+    type(linear_layer) :: out
+    allocate(out%func, source=func)
+  end function linear_layer_from_activation
+
+  function linear_layer_from_activation_and_size(func, inputs, outputs) result (out)
+    class(Activation), intent(in) :: func
+    type(linear_layer) :: out
+    integer, intent(in) :: inputs, outputs
+    call out%set_layout(inputs, outputs)
+    allocate(out%func, source=func)
+  end function linear_layer_from_activation_and_size
+
+  function linear_layer_from_size(inputs, outputs) result (out)
+    type(linear_layer) :: out
+    integer, intent(in) :: inputs, outputs
+    call out%set_layout(inputs, outputs)
+  end function linear_layer_from_size
+
   subroutine set_weights_random(this)
     class(connectom), intent(inout) :: this
     call random_number(this%weights)
@@ -166,7 +193,7 @@ contains
     real, intent(in) :: signals(:,:)
     real :: out(this%outputs,size(signals,2)), wrapper(this%inputs+1,size(signals,2))
     wrapper(this%inputs+1,:)=1
-    wrapper(: this%inputs,:)=signals
+    wrapper(1:this%inputs,:)=signals
     out = matmul(this%weights, wrapper)
     if (allocated(this%func)) then
       out = this%func%activate(out)
@@ -271,7 +298,7 @@ contains
 
     prev_error = basic_SGD(this,error,alpha)
     deallocate(this%signals)
-    deallocate(this%derivatives)
+    if (allocated(this%derivatives)) deallocate(this%derivatives)
   end function train_backward_connectom
 
   function basic_SGD(this, error, alpha) result (prev_error)

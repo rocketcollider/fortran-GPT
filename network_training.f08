@@ -12,8 +12,7 @@ program network_training
     real ::  cost
     integer :: i(8), index, run, answer
 
-    type(identity) :: ident
-    type(bias_layer) :: simple_lyr
+    type(linear_layer) :: simple_lyr
     type(SquaredLoss):: sqloss
     ! type(ReLU), target :: ReLUf
     ! type(softmax), target :: soft
@@ -43,33 +42,27 @@ program network_training
     end associate
 
     do run=1,10
-      simple_lyr = bias_layer(ident, 256,8)
+      simple_lyr = linear_layer(256,8)
       net = network([simple_lyr], sqloss)
       !net = network([256,8],[wrap(ident), wrap(ident)])
       call net%layers(1)%fixed_init( 0.1 )
-      !call net%initiate()
       answer = 1000
-      do index=1,50
+      do index=1,100
         cost = net%batch_train(data, answers, 1.9825)
       end do
 
-      do index = 0,255
-        if ((sum(net%run(data(:,index+1)) * 2**[7,6,5,4,3,2,1,0])) /= (index*1.0)) then
-          answer = index+1
-          exit
-        endif
-      end do
-      if (answer < 300) then
+      cost = sum(sqLoss%eval(net%run(data), answers))/size(answers,2)
+
+      if (cost > 0.5) then
         print *, 'binomial training failed at'
         print *, answer
         print *, "step, during run: "
         print *, run
         print *, "actual output: "
+        print *, net%run(data(:,27))
       end if
     end do
-    print *, 'past do loop'
   end block
-  print *, 'past block 1?'
 
   block ! simple perceptron
     real, dimension(1,1001) :: data, answers

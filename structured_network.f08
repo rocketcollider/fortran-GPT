@@ -96,23 +96,22 @@ contains
     class(network), intent(in) :: this
     real, intent(in) :: signals(:,:)
     real :: out(this%outputs,size(signals,2))
-    real, pointer :: tmp(:,:)
-    real, target :: input(size(signals,1),size(signals,2))
-    integer :: i
 
-    input = signals
-    tmp => input
-
-    do i=1,size(this%layers)
-      block
-        real, target :: node_values(this%layers(i)%outputs, size(signals,2))
-        node_values = this%layers(i)%run(tmp)
-        tmp => node_values
-      end block
-    end do
-
-    out = tmp
+    out = internal_recursive_interpret2(this%layers, signals, size(this%layers))
   end function pure_interpret2
+
+  recursive pure function internal_recursive_interpret2(layers, signals, run_n) result (out)
+    class(layer), intent(in) :: layers(:)
+    real, intent(in) :: signals(:,:)
+    integer, intent(in):: run_n
+    real :: out( layers(run_n)%outputs, size(signals, 2) )
+
+    if (run_n <=1 ) then
+      out = layers(1)%run(signals)
+    else
+      out = layers(run_n)%run( internal_recursive_interpret2( layers, signals , run_n-1) )
+    end if
+  end function internal_recursive_interpret2
 
   function train_forward2(this, signals) result (out)
     class(network), intent(inout) :: this
