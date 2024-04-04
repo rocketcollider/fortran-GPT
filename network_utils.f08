@@ -176,16 +176,16 @@ contains
     out = base / spread(sum(base,1), 1, size(signal,1))
   end function a_softmax_r
 
-
   pure function a_d_softmax_r(signal) result (out)
     real, intent(in), dimension(:) :: signal
     real, dimension(size(signal)) :: out
-    real :: base
-    base = sum(exp(signal))
-    out = exp(signal) * (base - exp(signal))/base**2
+    real :: base(size(signal))
+    base = exp(signal)
+    out = base * (sum(base) - base)/sum(base)**2
   end function a_d_softmax_r
 
-  pure function one_hot(state,max) result (out)
+
+  pure function one_hot_function(state,max) result (out)
     integer, intent(in) :: state, max
     real, dimension(max) :: out
     out = 0.
@@ -196,7 +196,7 @@ contains
       out(state) = 1.
     end if
     ! return all 0 automatically
-  end function one_hot
+  end function one_hot_function
 
   function one_cold(state) result (out)
     real, intent(in) :: state(:)

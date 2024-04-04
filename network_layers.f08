@@ -1,6 +1,7 @@
 
 module network_layers
   use network_utils
+  use network_encoding
   implicit none
 
 !========================== abstract layer ==========================

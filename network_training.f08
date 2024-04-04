@@ -3,6 +3,7 @@ program network_training
   use structured_network
   use network_layers
   use file_helpers
+  use combined_layers
   implicit none
   !use network_basics
 
@@ -77,36 +78,16 @@ program network_training
       data(1,i)=-2.+4*(i-1)/1000.
       answers(1,i)= data(1,i)**2
     end do
-    print *, data(1,1), answers(1,1)
     net = network([1,5,1], [bias_layer(ReLUf), bias_layer(ident)], sqLoss)
     !call net%initiate()
-    call net%layers(1)%fixed_init(0.1)
+    call net%layers(1)%random_init()
     call net%layers(2)%fixed_init(0.5)
-    print *, sum(data)/size(data)
-    do i=1,10
+    do i=1,100
       cost = net%batch_train(data, answers, 0.6)
-      print *, cost
     end do
+    print *, "please manually confirm the following values are close to 4,1,0,1,4 !"
     print *, net%run([-2.]),net%run([-1.]),net%run([0.]),net%run([1.]),net%run([2.])
 
-  end block
-
-  block ! ingest training data
-    integer :: io, strlen
-    character(len=128) :: a
-    10 format(A)
-    print *, ' plain file open'
-    io = 100
-    open(newunit=io, file='names.txt', status='old', action='read')
-    print *, io
-    read(io, 10) a
-    do strlen=128,1,-1
-      if (a(strlen:strlen) /= ' ') then
-        exit
-      end if
-    end do
-    close(io)
-    print *, a
   end block
 
   block
@@ -116,9 +97,7 @@ program network_training
     type(network) :: net
     integer :: dic_len
 
-    print *, "before declaraton"
     names = open_path('names.txt')
-    print *, "after declaration"
     !allocate(line, source=names%readline())
     line = names%readline()
     line = names%readline()
@@ -131,60 +110,36 @@ program network_training
       !type(identity), target :: ident
       type(softmax),target :: sftmax
       type(LogLoss) :: cost
-      type(bias_layer) :: simple_match
-      real :: training_set(dic_len+1, size(out)), rest(dic_len+1, dic_len+1), loss_vals
-      integer :: i,test(dic_len+1, dic_len+1), last, next
-
-      test = 0
-
-      do i=1,size(out)-1
-        test(out(i)+1, out(i+1)+1) = (test(out(i)+1, out(i +1) +1) +1) !brackets just for alliteration
-      end do
-      print *, names%dictionary
-      print *, test(1,:)
-      print *, test(4,:)
-
-      do i=1, dic_len+1
-        rest(i,:) = test(i,:)*1.0/sum(test(i,:))
-        !print *, rest(i,:)
-      end do
-
-      call srand(12345)
-      do i=1,10 !generate 10 names
-        last = 1
-        line = ''
-        do while (.true.)
-          next = random_select(rest(last,:))
-          if (next == 1) then
-            if (len(line)>3) then
-              exit
-            else
-              cycle
-            end if
-          end if
-          line = line // names%dictionary(next-1:next-1)
-          print *, line
-          last = next
-        end do
-      end do
+      type(self_attention_head) :: simple_match
+      real :: training_set(dic_len+1, size(out)), loss_init, loss_finit
+      integer :: i
 
       training_set=0
 
-      simple_match = bias_layer(sftmax, dic_len+1, dic_len+1)
+      simple_match = self_attention_head(sftmax, dic_len+1, dic_len+1)
       net = network([simple_match], cost)
       !net = network([dic_len+1,dic_len+1], [wrap(ident), wrap(sftmax)], cost)
-      call net%initiate()
+      call net%layers(1)%fixed_init(0.001)
 
       do concurrent (i=1:size(out))
-        training_set(:,i)=one_hot(out(i)+1,dic_len+1)
+        training_set(:,i)=one_hot_function(out(i)+1,dic_len+1)
       end do
 
-      do i=1,1
-        loss_vals = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 0.2)
+      loss_init = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 10.)
+      do i=1,10
+        loss_finit = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 10.)
       end do
+
+      if (loss_init < loss_finit) then
+        print *, "Loss increased instead of getting lower!"
+        print *, "Possibly self-attention-head has bad back-prop?"
+      else
+        print *, 'successfully descendet gradient!'
+      end if
       print *, 'end'
 
     end block
+    print *, "roulling averages:"
     block
       real :: data(2,3,1), out(2,3,1)
       data = reshape([1,1,2,3,3,2],[2,3,1])
