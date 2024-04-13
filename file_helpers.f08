@@ -20,7 +20,7 @@ contains
     type(file) :: out
     logical :: exists
     integer :: io
-    do io=1,1000
+    do io=10,1000
       inquire(unit=io,opened=exists)
       if (.not. exists) then
         open(unit=io, file=path, status='old', action='read')
