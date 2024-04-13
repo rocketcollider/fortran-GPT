@@ -14,7 +14,7 @@ module combined_layers
   end type additive_layer
 
   type, extends(layer) :: self_attention_head
-    real, allocatable :: embed_K(:,:), embed_Q(:,:), embed_V(:,:), KQT(:,:,:), KQT_derivatives(:,:,:)
+    real, allocatable :: embed_K(:,:), embed_Q(:,:), embed_V(:,:), QKT(:,:,:), QKT_derivatives(:,:,:)
   contains
     procedure :: train_forward => train_forward_self_attention
     procedure :: train_backward => backpropagate_self_attention
@@ -178,10 +178,10 @@ contains
   pure function run_self_attention(this, signals) result (out)
     class(self_attention_head), intent(in) :: this
     real, intent(in) :: signals(:,:)
-    real :: out(this%outputs, size(signals,2)), KQT(size(this%embed_K,1), size(this%embed_Q, 1))
+    real :: out(this%outputs, size(signals,2)), QKT(size(this%embed_K,1), size(this%embed_Q, 1))
     integer :: i
     do concurrent (i=1:size(signals,2))
-      KQT = matmul(                           &
+      QKT = matmul(                           &
         reshape(                              &
           matmul(this%embed_K, signals(:,i)), &
           [size(this%embed_K,1),1]            &
@@ -191,8 +191,8 @@ contains
           [1,size(this%embed_Q,1)]            &
         )                                     &
       )
-      call soft_mark(KQT)
-      out(:,i) = matmul(KQT, matmul(this%embed_V, signals(:,i)))
+      call soft_mark(QKT)
+      out(:,i) = matmul(QKT, matmul(this%embed_V, signals(:,i)))
     end do
   end function run_self_attention
 
@@ -204,30 +204,31 @@ contains
 
     if (allocated(this%signals)) deallocate(this%signals)
     allocate(this%signals, source=signals)
-    if (allocated(this%KQT)) deallocate(this%KQT)
-    allocate(this%KQT(size(this%embed_K,1),size(this%embed_Q,1),size(this%embed_V,2)), source=0.)
-    if (allocated(this%KQT_derivatives)) deallocate(this%KQT_derivatives)
-    allocate(this%KQT_derivatives(size(this%embed_K,1),size(this%embed_Q,1),size(this%embed_V,2)),source=0.)
+    if (allocated(this%QKT)) deallocate(this%QKT)
+    allocate(this%QKT(size(this%embed_K,1),size(this%embed_Q,1),size(this%embed_V,2)), source=0.)
+    if (allocated(this%QKT_derivatives)) deallocate(this%QKT_derivatives)
+    allocate(this%QKT_derivatives(size(this%embed_K,1),size(this%embed_Q,1),size(this%embed_V,2)),source=0.)
 
+    print *, "remember to transpose this matmul! combined_layers.f08"
     do concurrent(i=1:this%inputs)
-      this%KQT(:,:,i) = matmul(                              &
+      this%QKT(:,:,i) = matmul(                              &
         reshape(this%embed_K(:,i),[size(this%embed_K,1),1]), &
         reshape(this%embed_Q(:,i),[1,size(this%embed_Q,1)])  &
       )
       block !soft_mask
-        real :: exponentiated(size(this%KQT,1))
+        real :: exponentiated(size(this%QKT,1))
         integer :: row
 
         exponentiated = 0
 
-        do concurrent(row=1:size(this%KQT,1))
+        do concurrent(row=1:size(this%QKT,1))
         ! this might be slower on GPU?
           !sft_arr(row, row+1:) = 0
-          exponentiated(1:row)=exp(this%KQT(row,1:row,i))
+          exponentiated(1:row)=exp(this%QKT(row,1:row,i))
         ! Might be better to exp everything and set exponentiated(row+1:) = 0
           if (any(exponentiated(1:row)>0)) then
-            this%KQT(row,1:row,i) = exponentiated(1:row) / sum(exponentiated(1:row))    / row
-            this%KQT_derivatives(row,1:row,i) = (sum(exponentiated(1:row))-exponentiated(1:row))* &
+            this%QKT(row,1:row,i) = exponentiated(1:row) / sum(exponentiated(1:row))    / row
+            this%QKT_derivatives(row,1:row,i) = (sum(exponentiated(1:row))-exponentiated(1:row))* &
                                     exponentiated(1:row) / sum(exponentiated(1:row))**2 / row
           end if
         end do
@@ -245,7 +246,7 @@ contains
 
       do concurrent (i=1:size(signals,2))
         out(:,i) = matmul(            &
-          this%KQT(:,:,channels(i)),  &
+          this%QKT(:,:,channels(i)),  &
           this%embed_V(:,channels(i)) &
         )
       end do
@@ -271,7 +272,7 @@ contains
     real :: errorV(size(this%embed_Q,1),size(this%embed_Q,2))
     real :: out(this%inputs,size(error,2)), derivative_times_error(this%outputs, size(error,2))
     integer :: i, channels(size(error,2))
-    real :: KQT_err(this%outputs, size(this%embed_V,1))
+    real :: QKT_err(this%outputs, size(this%embed_V,1))
 
     errorK = 0
     errorQ = 0
@@ -286,23 +287,23 @@ contains
     end if
 
     do concurrent (i=1:size(error,2))
-      KQT_err = matmul(                                    &
+      QKT_err = matmul(                                    &
         derivative_times_error(:,i:i),                     &
         transpose(this%embed_V(:,channels(i):channels(i))) &
       )
-      KQT_err = KQT_err * this%KQT_derivatives(:,:,channels(i))
+      QKT_err = QKT_err * this%QKT_derivatives(:,:,channels(i))
 
-      ! errorK = KQT_err x embed_Q  = (K x Q^T)' x Q = K'
-      errorK(:,channels(i)) = errorK(:,channels(i)) + matmul(KQT_err, this%embed_Q(:,channels(i)))
-      ! errorQ = (t(embed_K) x KQT_err)^T = (K^T x (KxQ^T)')^T = Q^T^T=Q
-      errorQ(:,channels(i)) = errorQ(:,channels(i)) + matmul(transpose(KQT_err), this%embed_K(:,channels(i)))
+      ! errorK = QKT_err x embed_Q  = (K x Q^T)' x Q = K'
+      errorK(:,channels(i)) = errorK(:,channels(i)) + matmul(QKT_err, this%embed_Q(:,channels(i)))
+      ! errorQ = (t(embed_K) x QKT_err)^T = (K^T x (KxQ^T)')^T = Q^T^T=Q
+      errorQ(:,channels(i)) = errorQ(:,channels(i)) + matmul(transpose(QKT_err), this%embed_K(:,channels(i)))
       ! pretty much useless, but have to provide out.
-      out(:,i) = matmul(transpose(this%KQT(:,:,channels(i))), derivative_times_error(:,i))
+      out(:,i) = matmul(transpose(this%QKT(:,:,channels(i))), derivative_times_error(:,i))
       errorV(:,channels(i)) = errorV(:,channels(i)) + out(:,i)
       !could call backpropagate on Q & K here if they were layers!
     end do
-    deallocate(this%KQT_derivatives)
-    deallocate(this%KQT)
+    deallocate(this%QKT_derivatives)
+    deallocate(this%QKT)
     !could average by row?
     errorQ = errorQ/size(error,2)
     errorK = errorK/size(error,2)

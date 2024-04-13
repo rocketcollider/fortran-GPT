@@ -97,6 +97,18 @@ module network_layers
     module procedure linear_layer_from_size
   end interface linear_layer
 
+  type, extends(connectom) :: blind_layer
+  contains
+    procedure :: set_layout => set_blind_layout
+    procedure :: train_forward => train_blind_layer
+    procedure :: run => get_blind_layer
+    procedure :: calc_grad => gradient_blind_layer
+  end type blind_layer
+
+  interface blind_layer
+    module procedure blind_layer_from_size
+  end interface blind_layer
+
 contains
 
   subroutine unimplemented_fixed_init2(this, values)
@@ -134,6 +146,15 @@ contains
     if (allocated(this%weights)) deallocate(this%weights)
     allocate(this%weights(outputs,inputs))
   end subroutine set_linear_layout
+
+  subroutine set_blind_layout(this, inputs, outputs)
+    class(blind_layer), intent(inout) :: this
+    integer, intent(in) :: inputs, outputs
+    this%inputs = 0
+    this%outputs = outputs
+    if (allocated(this%weights)) deallocate(this%weights)
+    allocate(this%weights(outputs,inputs))
+  end subroutine set_blind_layout
 
   subroutine set_weights_size(this, inputs, outputs)
     class(connectom), intent(inout) :: this ! HAS to be inout, or other params are lost !!
@@ -184,6 +205,12 @@ contains
     call out%set_layout(inputs, outputs)
   end function linear_layer_from_size
 
+  function blind_layer_from_size(inputs, outputs) result (out)
+    type(blind_layer) :: out
+    integer, intent(in) :: inputs, outputs
+    call out%set_layout(inputs, outputs)
+  end function blind_layer_from_size
+
   subroutine set_weights_random(this)
     class(connectom), intent(inout) :: this
     call random_number(this%weights)
@@ -210,6 +237,20 @@ contains
       out = this%func%activate(out)
     end if
   end function interpret_linear_layer
+
+  pure function get_blind_layer(this, signals) result (out)
+    class(blind_layer), intent(in) :: this
+    real, intent(in) :: signals(:,:)
+    real :: out(this%outputs, size(signals,2))
+    !allow repitition?
+    integer :: count
+    count=0
+    do while (count < size(signals,2))
+      out(:, count+1:min(count+size(this%weights,2), size(signals,2))) = &
+        this%weights(:, :min(size(this%weights,2), size(signals,2)-count))
+      count = count+size(this%weights,2)
+    end do
+  end function get_blind_layer
 
   function connectom_signal_transport(this) result(out)
     class(connectom), intent(inout)::this
@@ -255,6 +296,45 @@ contains
 
     out = this%internal_signal_transport()
   end function train_forward_linear_layer
+
+  function train_blind_layer(this, signals) result (out)
+    class(blind_layer), intent(inout) :: this
+    real, intent(in) :: signals(:,:)
+    real :: out(this%outputs, size(signals,2))
+    if (allocated(this%signals)) deallocate(this%signals)
+    allocate(this%signals, source=signals)
+    out = this%run(signals)
+  end function train_blind_layer
+
+  function gradient_blind_layer(this, error, corrections) result (prev_error)
+    class(blind_layer), intent(in) :: this
+    real, intent(out) :: corrections(size(this%weights,1),size(this%weights,2))
+    real, intent(in) :: error(:,:)
+    real :: prev_error(this%inputs, size(error,2)) !this%inputs is zero!
+
+    if (.not. allocated(this%signals) .or. (.not. allocated(this%derivatives) .and. allocated(this%func))) then
+      print *, "THIS NEEDS SIGNALS AND DERIVATIVES! RUN TRAIN_FORWARD FIRST!!!"
+      stop
+    end if
+
+    block
+      real :: derivative_times_error(size(error,1), size(error,2))
+      if(allocated(this%func)) then
+        derivative_times_error = this%derivatives * error
+      else
+        derivative_times_error = error
+      end if
+
+      corrections = matmul( &
+        derivative_times_error,              &
+        transpose(          &
+          this%signals      &
+        )                   &
+      ) / size(error,2)
+    end block
+
+  end function gradient_blind_layer
+
 
   function gradient_connectom(this, error, corrections) result (prev_error)
     class(connectom), intent(in) :: this

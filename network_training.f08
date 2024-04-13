@@ -91,6 +91,21 @@ program network_training
   end block
 
   block
+    type(blind_layer) :: pos_encoding
+    real :: input(0,10), output(7,10)
+
+    pos_encoding = blind_layer(4,7)
+
+    call pos_encoding%random_init()
+    output = pos_encoding%run(input)
+    if (all(shape(input) == [0,10]) .and. all(shape(output) == [7,10]) .and. all(shape(pos_encoding%weights)==[7,4])) then
+      print *, "run blind layer produces correct shape"
+    else
+      print *, "ERROR: blind layer produced mismatching dimensions during run!"
+    end if
+  end block
+
+  block
     type(file) names
     character(len=:), allocatable :: line
     integer, allocatable :: out(:)
@@ -98,9 +113,7 @@ program network_training
     integer :: dic_len
 
     names = open_path('names.txt')
-    !allocate(line, source=names%readline())
-    line = names%readline()
-    line = names%readline()
+    allocate(line, source=names%readline())
 
     allocate(out, source=names%dictionarize())
 
@@ -125,6 +138,8 @@ program network_training
         training_set(:,i)=one_hot_function(out(i)+1,dic_len+1)
       end do
 
+      ! self-attention-head is tested against letters instead of positions.
+      ! This is for testing-purposese only, want to confirm gradient descent works!
       loss_init = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 10.)
       do i=1,10
         loss_finit = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 10.)
@@ -139,7 +154,7 @@ program network_training
       print *, 'end'
 
     end block
-    print *, "roulling averages:"
+    print *, "rolling averages:"
     block
       real :: data(2,3,1), out(2,3,1)
       data = reshape([1,1,2,3,3,2],[2,3,1])
