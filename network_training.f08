@@ -129,7 +129,7 @@ program network_training
 
       training_set=0
 
-      simple_match = self_attention_head(sftmax, dic_len+1, dic_len+1)
+      simple_match = self_attention_head(sftmax, dic_len+1, 1, dic_len+1)
       net = network([simple_match], cost)
       !net = network([dic_len+1,dic_len+1], [wrap(ident), wrap(sftmax)], cost)
       call net%layers(1)%fixed_init(0.001)
@@ -141,7 +141,7 @@ program network_training
       ! self-attention-head is tested against letters instead of positions.
       ! This is for testing-purposese only, want to confirm gradient descent works!
       loss_init = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 10.)
-      do i=1,10
+      do i=1,1
         loss_finit = net%batch_train( training_set(: , :size(out)-1), training_set(:,2:), 10.)
       end do
 
@@ -161,6 +161,46 @@ program network_training
       print *, data
       out = rolling_average(data)
       print *, out
+    end block
+
+    block
+      type(linear_layer):: Q, K, V
+      type(dynamic_window) :: attention, evaluate
+      type(LogLoss) :: cost
+      type(network) :: net
+      type(softmark) :: soft_mark
+      type(softmax) :: soft_max
+
+      real :: training_set(dic_len+1, size(out)/15*15), loss_init, loss_finit
+      integer :: i, window
+      do concurrent (i=1:(size(out)/15*15))
+        training_set(:,i)=one_hot_function(out(i)+1,dic_len+1)
+      end do
+
+      window = 5
+
+      Q = linear_layer(dic_len+1, 5)
+      K = linear_layer(dic_len+1, 5)
+      V = linear_layer(dic_len+1, dic_len+1)
+      attention = dynamic_window(window, Q, window, K, soft_mark, .true.)
+      evaluate = dynamic_window(window, V, 2*window, attention, soft_max)
+
+      net = network([evaluate], cost)
+      call net%initiate()
+
+      do i=0,10
+        loss_init = net%batch_train( training_set(: , :(size(out)/3/15-1)*3*15), training_set(:,16:size(out)/15/3*15), .1)
+      end do
+      do i=0,10
+        loss_finit = net%batch_train( training_set(: , :(size(out)/3/15-1)*3*15), training_set(:,16:size(out)/15/3*15), .1)
+      end do
+
+      if (loss_init > loss_finit) then
+        print *, "Gradient Descendet!"
+      else
+        print *, "LOSSES DIDN'T DECREASE FOR DYNAMIC WINDOW!!"
+      endif
+
     end block
 
   end block

@@ -8,6 +8,7 @@ module network_layers
 
   type, abstract :: layer
     integer :: inputs, outputs
+    integer :: in_window=1, out_window=1
     class(Activation), allocatable :: func
     real, allocatable :: signals(:,:), derivatives(:,:)
   contains
@@ -46,14 +47,14 @@ module network_layers
     import layer
       class(layer), intent(inout) :: this
       real, intent(in) :: signals(:,:) ! 1st dim this%inputs long
-      real :: out(this%outputs, size(signals,2))
+      real :: out(this%outputs, size(signals,2)/this%in_window*this%out_window)
     end function layer_train_forward
 
     function layer_train_backward(this,error, alpha) result (out)
       import layer
       class(layer), intent(inout) :: this
       real, intent(in) :: alpha, error(:,:) ! 1st dim this%outputs long
-      real :: out(this%inputs, size(error,2))
+      real :: out(this%inputs, (size(error,2)/this%out_window)*this%in_window)
     end function layer_train_backward
 
     subroutine layer_random_init(this)

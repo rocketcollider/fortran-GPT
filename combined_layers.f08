@@ -14,7 +14,11 @@ module combined_layers
   end type additive_layer
 
   type, extends(layer) :: self_attention_head
-    real, allocatable :: embed_K(:,:), embed_Q(:,:), embed_V(:,:), QKT(:,:,:), QKT_derivatives(:,:,:)
+    integer :: window
+    class(layer), allocatable :: embedK, embedQ, embedV
+    real, allocatable :: embed_K(:,:), embed_Q(:,:), embed_V(:,:), attention(:,:,:), attention_derivatives(:,:,:)
+    real, allocatable, dimension(:,:) :: K, Q, VT
+    real, allocatable :: QKT(:,:,:), QKT_derivatives(:,:,:)
   contains
     procedure :: train_forward => train_forward_self_attention
     procedure :: train_backward => backpropagate_self_attention
@@ -28,7 +32,128 @@ module combined_layers
     module procedure self_attention_from_activation_and_params
   end interface self_attention_head
 
+  type, extends(layer) :: dynamic_window
+    class(layer), allocatable :: embed_left, embed_right
+    logical :: trans_left
+    integer :: left_window, right_window
+    real, allocatable :: left(:,:,:), right(:,:), interstage(:,:,:)
+  contains
+    procedure :: train_forward => train_dynamic_window
+    procedure :: train_backward => backpropagate_dynamic_window
+    procedure :: run => run_dynamic_window
+    procedure :: random_init => randomize_dynamic_window
+    procedure :: f_init1 => dynamic_window_fixed_init
+  end type dynamic_window
+
+  interface dynamic_window
+    module procedure dynamic_window_from_layers
+    module procedure dynamic_window_from_layers_and_activation
+  end interface dynamic_window
+
 contains
+
+  function dynamic_window_from_layers(left_window, left, right_window, right, transpose_left) result (out)
+    type(dynamic_window) :: out
+    class(layer), intent(in) :: left, right
+    integer, intent(in) :: left_window, right_window
+    logical, intent(in), optional :: transpose_left
+    out%inputs = left%inputs
+    allocate(out%embed_left, source=left)
+    allocate(out%embed_right, source=right)
+    out%in_window = left_window+right_window
+    out%left_window = left_window
+    out%right_window = right_window
+    out%out_window = right_window/right%in_window*right%out_window
+    if (present(transpose_left)) then
+      out%trans_left = transpose_left
+      if (transpose_left) then
+        out%outputs = left_window
+      else
+        out%outputs = left%outputs
+      endif
+    else
+      out%trans_left = .false.
+      out%outputs = left%outputs
+    endif
+  end function dynamic_window_from_layers
+
+  function dynamic_window_from_layers_and_activation(left_window, left, right_window, right, activation_function, transpose_left) result (out)
+    type(dynamic_window) :: out
+    class(layer), intent(in) :: left, right
+    integer, intent(in) :: left_window, right_window
+    class(activation), intent(in) :: activation_function
+    logical, intent(in), optional :: transpose_left
+    out = dynamic_window_from_layers(left_window, left, right_window, right, transpose_left)
+    allocate(out%func, source=activation_function)
+
+  end function dynamic_window_from_layers_and_activation
+
+  recursive subroutine randomize_dynamic_window(this)
+    class(dynamic_window), intent(inout) :: this
+    call this%embed_right%random_init()
+    call this%embed_left%random_init()
+  end subroutine randomize_dynamic_window
+
+  pure subroutine dynamic_window_fixed_init(this, value)
+    class(dynamic_window), intent(inout) :: this
+    real, intent(in) :: value
+    call this%embed_right%f_init1(value)
+    call this%embed_left%f_init1(value)
+  end subroutine
+
+  pure function run_dynamic_window(this, signals) result (out)
+    class(dynamic_window), intent(in) :: this
+    real, intent(in) :: signals(:,:)
+    real :: out(this%outputs, size(signals,2)/(this%left_window+this%right_window)*this%right_window)
+    integer :: i, samples, window, left_dims(2)
+
+    !preparatory statements
+
+    window=this%left_window+this%right_window
+    if (mod(size(signals,2), window) /= 0) error stop "DYNAMIC WINDOW GOT INVALID SIGNAL LENGHT CHUNKS!"
+    samples = size(signals,2)/window
+    !create new block just to simplify right / left declaration
+    left_dims = [this%embed_left%outputs, this%embed_right%outputs * samples]
+    if(this%trans_left) then
+      left_dims = [this%left_window, this%embed_left%outputs * samples]
+    endif
+
+    !The actual function block
+
+    block
+      real :: left_signal(this%embed_left%outputs, this%left_window*samples)
+      real :: right_signal(this%embed_right%outputs, this%right_window*samples)
+      real :: right(this%embed_right%outputs, this%right_window * samples)
+      !This definitely works for non-transposed left
+      real :: left(left_dims(1), left_dims(2))
+      !It works with transposed left as well, assuming SQUARE ATTENTION!
+      !If non-square, transposed shape needs to be:
+      !real :: left(this%left_window, this%embed_left%outputs * samples) !but this%embed_left%outputs == this%embed_right%outputs
+
+      do concurrent(i=0:samples-1)
+        left_signal(:,this%left_window*i+1:this%left_window*(i+1)) = signals(:, window*i+1:window*i+this%left_window)
+        right_signal(:,this%right_window*i+1:this%right_window*(i+1)) = signals(:,window*i+this%left_window+1:window*(i+1))
+      end do
+      right = this%embed_right%run(right_signal)
+      if (this%trans_left) then
+        left = transpose(this%embed_left%run(left_signal))
+      else
+        left = this%embed_left%run(left_signal)
+      endif
+      do concurrent(i=0:samples-1)
+        !need to prepare out as concatenated array
+        out(:, window*(i-1)+1 : window*i) = matmul(                            &
+          left(:,this%embed_right%outputs*i+1:this%embed_right%outputs*(i+1)), &
+          right(:,this%right_window*i+1:this%right_window*(i+1))               &
+        )
+
+        if (allocated(this%func)) then
+          out(:,window*i+1:window*(i+1)) = this%func%activate(out(:,window*i+1:window*(i+1)))
+        end if
+      end do
+    end block
+
+  end function run_dynamic_window
 
   pure subroutine additive_layer_fixed_init(this, value)
     class(additive_layer), intent(inout) :: this
@@ -138,26 +263,34 @@ contains
     end do
   end function backpropagate_additive_layer
 
-  function self_attention_from_params(channels, embedded) result (self_attention)
+  function self_attention_from_params(channels, window, head_size) result (self_attention)
     type(self_attention_head) :: self_attention
-    integer, intent(in) :: channels, embedded
-    self_attention%outputs = embedded
+    integer, intent(in) :: channels, window, head_size
+    self_attention%outputs = head_size
+    self_attention%window = window
     self_attention%inputs = channels
-    allocate(self_attention%embed_K(embedded, channels))
-    allocate(self_attention%embed_Q(embedded, channels))
-    allocate(self_attention%embed_V(embedded, channels))
+    allocate(self_attention%embedK, source = linear_layer(channels, head_size))
+    allocate(self_attention%embedQ, source = linear_layer(channels, head_size))
+    allocate(self_attention%embedV, source = linear_layer(channels, head_size))
+    allocate(self_attention%embed_K(head_size, channels))
+    allocate(self_attention%embed_Q(head_size, channels))
+    allocate(self_attention%embed_V(head_size, channels))
   end function self_attention_from_params
 
-  function self_attention_from_activation_and_params(func, channels, embedded) result (self_attention)
+  function self_attention_from_activation_and_params(func, channels, window, head_size) result (self_attention)
     type(self_attention_head) :: self_attention
     class(Activation), intent(in) :: func
-    integer, intent(in) :: channels, embedded
+    integer, intent(in) :: channels, window, head_size
     allocate(self_attention%func, source=func)
-    self_attention%outputs = embedded
+    self_attention%outputs = head_size
+    self_attention%window = window
     self_attention%inputs = channels
-    allocate(self_attention%embed_K(embedded, channels))
-    allocate(self_attention%embed_Q(embedded, channels))
-    allocate(self_attention%embed_V(embedded, channels))
+    allocate(self_attention%embedK, source = linear_layer(channels, head_size))
+    allocate(self_attention%embedQ, source = linear_layer(channels, head_size))
+    allocate(self_attention%embedV, source = linear_layer(channels, head_size))
+    allocate(self_attention%embed_K(head_size, channels))
+    allocate(self_attention%embed_Q(head_size, channels))
+    allocate(self_attention%embed_V(head_size, channels))
   end function self_attention_from_activation_and_params
 
   subroutine self_attention_randomize(this)
@@ -165,6 +298,9 @@ contains
     call random_number(this%embed_K)
     call random_number(this%embed_Q)
     call random_number(this%embed_V)
+    call this%embedK%random_init()
+    call this%embedQ%random_init()
+    call this%embedV%random_init()
   end subroutine self_attention_randomize
 
   pure subroutine self_attention_fixed_init(this, value)
@@ -173,84 +309,249 @@ contains
     this%embed_K=value
     this%embed_Q=value
     this%embed_V=value
+    call this%embedK%fixed_init(value)
+    call this%embedQ%fixed_init(value)
+    call this%embedV%fixed_init(value)
   end subroutine self_attention_fixed_init
 
   pure function run_self_attention(this, signals) result (out)
     class(self_attention_head), intent(in) :: this
     real, intent(in) :: signals(:,:)
-    real :: out(this%outputs, size(signals,2)), QKT(size(this%embed_K,1), size(this%embed_Q, 1))
-    integer :: i
-    do concurrent (i=1:size(signals,2))
-      QKT = matmul(                           &
-        reshape(                              &
-          matmul(this%embed_K, signals(:,i)), &
-          [size(this%embed_K,1),1]            &
-        ),                                    &
-        reshape(                              &
-          matmul(this%embed_Q, signals(:,i)), &
-          [1,size(this%embed_Q,1)]            &
-        )                                     &
-      )
-      call soft_mark(QKT)
-      out(:,i) = matmul(QKT, matmul(this%embed_V, signals(:,i)))
+    real, dimension(this%outputs, size(signals,2)) :: out, K, V
+    real :: QT(size(signals,2), this%outputs)
+    !real, dimension(this%outputs, this%window) :: K, QT, V
+    integer :: i,j
+
+    if (modulo(size(signals,2),this%window) /= 0) error stop "SELF ATTENTION GOT INVALID SIGNAL LENGHT CHUNKS!"
+
+    !K = matmul(this%embed_K, signals)
+    !QT = transpose(matmul(this%embed_Q, signals))
+    !V = matmul(this%embed_V, signals)
+    K = this%embedK%run(signals)
+    QT = transpose(this%embedQ%run(signals))
+    V = this%embedV%run(signals)
+    do concurrent (i=0:(size(signals,2)/this%window)-1)
+      block
+        real :: attention(this%window, this%window)
+        attention = matmul(                         &
+          K (this%window*i+1:this%window*(i+1), :), &
+          QT(:, this%window*i+1:this%window*(i+1))  &
+        )
+
+        !exponentiated = exp(attention)
+        do concurrent(j=1:this%window)
+          block
+            real :: exponentiated(j)
+            exponentiated = exp(attention(:j,j))
+            attention(:j,j)=exponentiated/sum(exponentiated) / (this%window**0.5)
+            !attention(:i,i)=exponentiated(:i,i)/sum(exponentiated(:i,i)) / (this%window*1.0)**(0.5)
+            attention(j+1:,j)=0
+          end block
+        end do
+
+        out(:, i+1:i+this%window) = matmul(V(:, i+1:i+this%window), attention)
+      end block
     end do
+
+    if (allocated(this%func)) out = this%func%activate(out)
+
   end function run_self_attention
+
+  recursive function train_dynamic_window(this, signals) result (out)
+    class(dynamic_window), intent(inout) :: this
+    real, intent(in) :: signals(:,:)
+    real :: out(this%outputs, (size(signals,2)/this%in_window)*this%out_window)
+    integer :: i, window, samples, left_shape(3)
+
+    !preparatory statements
+
+    window=this%left_window+this%right_window
+    if (mod(size(signals,2), window) /= 0) error stop "DYNAMIC WINDOW GOT INVALID SIGNAL LENGHT CHUNKS!"
+    samples = size(signals,2)/window
+
+    if(this%trans_left) then
+      left_shape = [this%left_window, this%embed_left%outputs, samples]
+    else
+      left_shape = [this%embed_left%outputs, this%embed_right%outputs, samples]
+    endif
+
+    if (allocated(this%interstage)) deallocate(this%interstage)
+    allocate(this%interstage(left_shape(1),this%out_window, samples))
+
+    if (allocated(this%func)) then
+      if (allocated(this%derivatives)) deallocate(this%derivatives)
+      allocate(this%derivatives(this%outputs, (size(signals,2)/this%in_window)*this%out_window))
+    endif
+
+    !The actual function block
+
+    !create new block just to simplify right / left declaration
+    block
+      real :: left_signal(this%embed_left%inputs, this%left_window*samples)
+      real :: right_signal(this%embed_right%inputs, this%right_window*samples)
+      !This definitely works for non-transposed left
+      !It works with transposed left as well, assuming SQUARE ATTENTION!
+      !If non-square, transposed shape needs to be:
+      !real :: left(this%left_window, this%embed_left%outputs * samples) !but this%embed_left%outputs == this%embed_right%outputs
+
+      !Discecting data to left and right portions!
+      do concurrent(i=0:samples-1)
+        left_signal(:,this%left_window*i+1:this%left_window*(i+1)) = signals(:, window*i+1:window*i+this%left_window)
+        right_signal(:,this%right_window*i+1:this%right_window*(i+1)) = signals(:,window*i+this%left_window+1:window*(i+1))
+      end do
+      if (allocated(this%right)) deallocate(this%right)
+      allocate(this%right, source=this%embed_right%train_forward(right_signal))
+
+      if (allocated(this%left)) deallocate(this%left)
+      !Run branch layers (running all at once should be more efficient than running every sample itself)
+      !right = this%embed_right%train_forward(right_signal)
+      if (this%trans_left) then
+        !                            RESHAPE handles slicing and transposing by suitable ORDER !
+        allocate(this%left, source = reshape(this%embed_left%train_forward(left_signal), order=[2,1,3], shape=left_shape))
+      else
+        allocate(this%left, source = reshape(this%embed_left%train_forward(left_signal), shape=left_shape))
+      endif
+
+      !Process results
+      do concurrent(i=1:samples)
+        !Store intermediate result locally
+        this%interstage(:,:,i) = matmul(                          &
+          this%left(:,:,i),                                       &
+          this%right(:,this%out_window*(i-1)+1:this%out_window*i) & !assuming right will produce one output-token for every input-token
+        ) ! `right` has it's own out_window different from right_window (which is it's in!)
+
+        !Post process 
+        if (allocated(this%func)) then
+          !this%derivatives(:, this%right_window*i+1:this%right_window*(i+1)) = &
+          !this%func%derivative(          &
+          !  this%interstage(:,:,i),      & ! using this%interstage because `out` will mutate. Just safe code practice.
+          !  out(:,this%right_window*i+1: & ! passing a SLICE of `out` to derivative to MUTATE!
+          !    this%right_window*(i+1))   & ! BEWARE, THIS IS CHANGED HERE!
+          !)
+          out(:,this%out_window*(i-1)+1 : this%out_window*i) = this%func%activate(this%interstage(:,:,i))
+          this%derivatives(:, this%out_window*(i-1)+1 : this%out_window*i) = this%func%derivative(this%interstage(:,:,i))
+        else
+          out(:, this%out_window*(i-1)+1 : this%out_window*i) = this%interstage(:,:,i)
+        end if
+      end do
+    end block
+  end function train_dynamic_window
+
+  recursive function backpropagate_dynamic_window(this, error, alpha) result (out)
+    class(dynamic_window), intent(inout) :: this
+    real, intent(in) :: error(:,:), alpha
+    real :: out(this%inputs, size(error,2)/this%out_window*this%in_window)
+    real :: derivative_times_error(size(error,1), size(error,2))
+    integer :: i, window, samples, left_width
+
+    !preparatory statements
+
+    window=this%left_window+this%right_window
+    if (mod(size(error,2), this%out_window) /= 0) error stop "DYNAMIC WINDOW GOT INVALID SIGNAL LENGHT CHUNKS!"
+    samples = size(error,2)/this%out_window
+
+    if(this%trans_left) then
+      ! should be relevant for linear layers, so left_window should be correct !
+      left_width = this%left_window
+    else
+      ! transpose not happening for attention matrix, so embed_right%outputs holds # of tokens !
+      left_width = this%embed_right%outputs
+    endif
+
+    if (allocated(this%func)) then
+      derivative_times_error = error * this%derivatives
+    else
+      derivative_times_error = error
+    end if
+
+    ! actual functional block
+
+    block
+      real :: left_error(this%embed_left%outputs, left_width/this%embed_left%in_window*this%embed_left%out_window*samples)
+      real :: right_error(this%embed_right%outputs, this%right_window/this%embed_right%in_window*this%embed_right%out_window*samples)
+      real :: left_error_out(this%embed_left%inputs, left_width*samples)
+      real :: right_error_out(this%embed_right%inputs, this%right_window*samples)
+      do concurrent(i=1:samples)
+        if (this%trans_left) then
+          left_error(:,left_width*(i-1)+1:left_width*i) = matmul(                 &
+            this%right(:,this%out_window*(i-1)+1:this%out_window*i),              &
+            transpose(                                                            &
+              derivative_times_error(:,this%out_window*(i-1)+1:this%out_window*i) &
+            )                                                                     &
+          )
+        else
+          left_error(:,left_width*(i-1)+1:left_width*i) = matmul(                &
+            derivative_times_error(:,this%out_window*(i-1)+1:this%out_window*i), &
+            transpose(                                                           &
+              this%right(:,this%out_window*(i-1)+1:this%out_window*i)            &
+            )                                                                    &
+          )
+        endif
+        right_error(:,this%out_window*(i-1)+1:this%out_window*i) = matmul( &
+          transpose(this%left(:,:,i)),                               &
+          derivative_times_error(:,             &
+            this%out_window*(i-1)+1:this%out_window*i &
+          )                                              &
+        )
+      end do
+
+      left_error_out = this%embed_left%train_backward(left_error, alpha)
+      right_error_out = this%embed_right%train_backward(right_error, alpha)
+
+      do concurrent(i=0:samples-1)
+        out(:, i*window+1 : i*window+this%left_window) = left_error_out(:,i*this%left_window+1:(i+1)*this%left_window)
+        out(:, i*window+1+this%left_window:(i+1)*window) = right_error_out(:,i*this%right_window+1:(i+1)*this%right_window)
+      end do
+    end block
+  end function backpropagate_dynamic_window
 
   function train_forward_self_attention(this, signals) result (out)
     class(self_attention_head), intent(inout) :: this
     real, intent(in) :: signals(:,:)
-    real :: out(this%outputs, size(signals,2))
-    integer :: i
+    real, dimension(this%outputs, size(signals,2)) :: out, K, V
+    real :: QT(size(signals,2),this%outputs)
+    real :: inv_sqrt
+    integer :: i,j, samples
+
+    if (mod(size(signals,2),this%window) /= 0) error stop "SELF ATTENTION GOT INVALID SIGNAL LENGHT CHUNKS!"
+
+    samples=size(signals,2)/this%window ! we know this works because of IF above
+
+    K = matmul(this%embed_K, signals)
+    V = matmul(this%embed_V, signals)
+    allocate(this%K, source=K)
+    allocate(this%VT, source=transpose(V))
+    allocate(this%Q, source=matmul(this%embed_Q, signals))
+    QT = transpose(this%Q)
+
+    inv_sqrt = this%window**0.5/this%window ! for numerical stability'
 
     if (allocated(this%signals)) deallocate(this%signals)
     allocate(this%signals, source=signals)
-    if (allocated(this%QKT)) deallocate(this%QKT)
-    allocate(this%QKT(size(this%embed_K,1),size(this%embed_Q,1),size(this%embed_V,2)), source=0.)
-    if (allocated(this%QKT_derivatives)) deallocate(this%QKT_derivatives)
-    allocate(this%QKT_derivatives(size(this%embed_K,1),size(this%embed_Q,1),size(this%embed_V,2)),source=0.)
+    if (allocated(this%attention)) deallocate(this%attention)
+    allocate(this%attention(this%window,this%window,samples))
+    if (allocated(this%attention_derivatives)) deallocate(this%attention_derivatives)
+    allocate(this%attention_derivatives(this%window,this%window,samples),source=0.)
 
-    print *, "remember to transpose this matmul! combined_layers.f08"
-    do concurrent(i=1:this%inputs)
-      this%QKT(:,:,i) = matmul(                              &
-        reshape(this%embed_K(:,i),[size(this%embed_K,1),1]), &
-        reshape(this%embed_Q(:,i),[1,size(this%embed_Q,1)])  &
+    do concurrent(i=0:samples-1)
+      this%attention(:,:,i+1) = matmul( &
+          QT(this%window*i+1:this%window*(i+1), :), &
+          K (:, this%window*i+1:this%window*(i+1))  &
       )
-      block !soft_mask
-        real :: exponentiated(size(this%QKT,1))
-        integer :: row
+      do concurrent(j=1:this%window)
+        block
+          real :: exponentiated(j), sum_exp
+          exponentiated = exp(this%attention(:j,j,i+1))
+          sum_exp = sum(exponentiated)
+          this%attention(:j,j,i+1)=exponentiated/sum_exp * inv_sqrt
+          this%attention(j+1:,j,i+1)=0
 
-        exponentiated = 0
-
-        do concurrent(row=1:size(this%QKT,1))
-        ! this might be slower on GPU?
-          !sft_arr(row, row+1:) = 0
-          exponentiated(1:row)=exp(this%QKT(row,1:row,i))
-        ! Might be better to exp everything and set exponentiated(row+1:) = 0
-          if (any(exponentiated(1:row)>0)) then
-            this%QKT(row,1:row,i) = exponentiated(1:row) / sum(exponentiated(1:row))    / row
-            this%QKT_derivatives(row,1:row,i) = (sum(exponentiated(1:row))-exponentiated(1:row))* &
-                                    exponentiated(1:row) / sum(exponentiated(1:row))**2 / row
-          end if
-        end do
-      end block
-    end do
-
-    block !actual output calculation
-      type(one_hot) :: decoder
-      integer :: channels(size(signals,2))
-
-      decoder = one_hot(size(this%embed_V, 2))
-
-      !assume signals is range of one-hots
-      channels = decoder%decode(signals)
-
-      do concurrent (i=1:size(signals,2))
-        out(:,i) = matmul(            &
-          this%QKT(:,:,channels(i)),  &
-          this%embed_V(:,channels(i)) &
-        )
+          this%attention_derivatives(:j,j,i+1) = (sum_exp-exponentiated)*exponentiated/sum_exp * inv_sqrt
+        end block
       end do
-    end block
+
+      out(:, 1+i*this%window:(1+i)*this%window) = matmul(V(:,1+i*this%window:(1+i)*this%window),this%attention(:,:,i+1))
+    end do
 
     if (allocated(this%func)) then
       if (allocated(this%derivatives)) deallocate(this%derivatives)
@@ -267,86 +568,71 @@ contains
     class(self_attention_head), intent(inout) :: this
     real, intent(in) :: error(:,:), alpha
     type(one_hot)::decoder
-    real :: errorQ(size(this%embed_Q,1),size(this%embed_Q,2))
-    real :: errorK(size(this%embed_Q,1),size(this%embed_Q,2))
-    real :: errorV(size(this%embed_Q,1),size(this%embed_Q,2))
+    real :: errorQ(size(this%embed_Q,1),size(error,2))
+    real :: errorK(this%outputs,size(error,2))
+    real :: errorV(this%outputs,size(error,2))
     real :: out(this%inputs,size(error,2)), derivative_times_error(this%outputs, size(error,2))
-    integer :: i, channels(size(error,2))
+    integer :: i, samples, channels(size(error,2))
     real :: QKT_err(this%outputs, size(this%embed_V,1))
 
-    errorK = 0
-    errorQ = 0
-    errorV = 0
-    channels = decoder%decode(this%signals)
+    if (mod(size(error,2),this%window) /= 0) error stop "SELF ATTENTION GOT INVALID SIGNAL LENGHT CHUNKS!"
 
-    if (allocated(this%func))then
+    samples = size(error,2) / this%window ! works because of above IF statement
+
+    if (allocated(this%func)) then
       derivative_times_error = error*this%derivatives
-      deallocate(this%derivatives)
     else
       derivative_times_error = error
     end if
 
-    do concurrent (i=1:size(error,2))
-      QKT_err = matmul(                                    &
-        derivative_times_error(:,i:i),                     &
-        transpose(this%embed_V(:,channels(i):channels(i))) &
-      )
-      QKT_err = QKT_err * this%QKT_derivatives(:,:,channels(i))
-
-      ! errorK = QKT_err x embed_Q  = (K x Q^T)' x Q = K'
-      errorK(:,channels(i)) = errorK(:,channels(i)) + matmul(QKT_err, this%embed_Q(:,channels(i)))
-      ! errorQ = (t(embed_K) x QKT_err)^T = (K^T x (KxQ^T)')^T = Q^T^T=Q
-      errorQ(:,channels(i)) = errorQ(:,channels(i)) + matmul(transpose(QKT_err), this%embed_K(:,channels(i)))
-      ! pretty much useless, but have to provide out.
-      out(:,i) = matmul(transpose(this%QKT(:,:,channels(i))), derivative_times_error(:,i))
-      errorV(:,channels(i)) = errorV(:,channels(i)) + out(:,i)
-      !could call backpropagate on Q & K here if they were layers!
+    do concurrent (i=0:samples-1)
+      block
+        real :: attention_error(this%window, this%window)
+        attention_error = matmul(                                     &
+          this%VT(this%window*i+1:this%window*(i+1), :),              &
+          derivative_times_error(:,this%window*i+1:this%window*(i+1)) &
+        )
+        errorV(:,this%window*i+1:this%window*(i+1)) = matmul(          &
+          derivative_times_error(:,this%window*i+1:this%window*(i+1)), &
+          transpose(this%attention(:,:,i+1))                           &
+        )
+        errorQ(:,this%window*i+1:this%window*(i+1)) = matmul( &
+          this%K(:,this%window*i+1:this%window*(i+1)),        &
+          transpose(attention_error)                          &
+        )
+        errorK(:,this%window*i+1:this%window*(i+1)) = matmul( &
+          this%Q(:,this%window*i+1:this%window*(i+1)),        & ! transpose of QT is Q
+          attention_error                                     &
+        )
+      end block
     end do
-    deallocate(this%QKT_derivatives)
-    deallocate(this%QKT)
-    !could average by row?
-    errorQ = errorQ/size(error,2)
-    errorK = errorK/size(error,2)
-    errorV = errorV/size(error,2)
 
-    this%embed_Q = this%embed_Q - errorQ*alpha
-    this%embed_K = this%embed_K - errorK*alpha
-    this%embed_V = this%embed_V - errorV*alpha
+    out = errorV+errorQ+errorK
+
+    block ! calculate actual correction matrices
+      real :: corrections_K(size(this%embed_K,1),size(this%embed_K,2))
+      real :: corrections_Q(size(this%embed_Q,1),size(this%embed_Q,2))
+      real :: corrections_V(size(this%embed_V,1),size(this%embed_V,2))
+      ! need do convert errors into corrections, a bunch of matrix multiplications ...
+      corrections_K = matmul(   &
+        errorK,                 &
+        transpose(this%signals) &
+      ) / size(error,2)
+      corrections_Q = matmul(   &
+        errorQ,                 &
+        transpose(this%signals) &
+      ) / size(error,2)
+      corrections_V = matmul(   &
+        errorV,                 &
+        transpose(this%signals) &
+      ) / size(error,2)
+      this%embed_Q = this%embed_Q - corrections_Q*alpha
+      this%embed_K = this%embed_K - corrections_K*alpha
+      this%embed_V = this%embed_V - corrections_V*alpha
+
+    end block
+    deallocate(this%K, this%VT, this%Q)
 
   end function backpropagate_self_attention
-
-! internal / shortcut function!
-  function soft_mask(sft_arr) result (derivatives)
-    real, intent(inout) :: sft_arr(:,:)
-    real :: derivatives(size(sft_arr,1), size(sft_arr,2))
-    real :: exponentiated(size(sft_arr,1))
-    integer :: row
-
-    derivatives = 0
-    exponentiated = 0
-
-    do concurrent(row=1:size(sft_arr,1))
-    ! this might be slower on GPU?
-      !sft_arr(row, row+1:) = 0
-      exponentiated(1:row)=exp(sft_arr(row,1:row))
-    ! Might be better to exp everything and set exponentiated(row+1:) = 0
-      sft_arr(row,1:row) = exponentiated(1:row) / sum(exponentiated(1:row))
-      !derivative(row,1:row) = exponentiated / sum(exponentiated) - exponentiated**2/sum(exponentiated)**2
-      ! sooooo:
-      derivatives(row,1:row) = sft_arr(row, 1:row) - sft_arr(row, 1:row)**2
-    end do
-  end function soft_mask
-
-  pure subroutine soft_mark(sft_arr)
-    real, intent(inout) :: sft_arr(:,:)
-    real :: exponentiated(size(sft_arr,1))
-    integer :: row
-    exponentiated=0
-    do concurrent(row = 1:size(sft_arr, 1))
-      !sft_arr(row, row+1:) = 0
-      exponentiated(1:row)=exp(sft_arr(row,1:row))
-      sft_arr(row, :)=exponentiated / sum(exponentiated)
-    end do
-  end subroutine soft_mark
 
 end module combined_layers

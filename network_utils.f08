@@ -23,7 +23,9 @@ module network_utils
     generic, public  :: activate => activate1, activate2
     procedure :: activate1 => generic_smooth_eval
     procedure(activation_function2), nopass, deferred :: activate2
-    procedure(activation_derivative), nopass, deferred :: derivative
+    generic, public  :: derivative => derivative1, derivative2
+    procedure :: derivative1 => generic_smooth_deriv
+    procedure(activation_derivative2), nopass, deferred :: derivative2
   end type Activation
 
   abstract interface
@@ -37,29 +39,35 @@ module network_utils
       real, dimension(size(signal,1),size(signal,2)) :: out
     end function activation_function2
 
-    pure function activation_derivative(signal) result (out)
-      real, intent(in), dimension(:) :: signal
-      real, dimension(size(signal)) :: out
-    end function activation_derivative
+    pure function activation_derivative2(signal) result (out)
+      real, intent(in), dimension(:,:) :: signal
+      real, dimension(size(signal,1),size(signal,2)) :: out
+    end function activation_derivative2
   end interface
 
   type, extends(Activation) :: identity
   contains
     procedure, nopass :: activate2 => ident_activate
-    procedure, nopass :: derivative => ident_der
+    procedure, nopass :: derivative2 => ident_der
   end type identity
 
   type, extends(Activation) :: ReLU
   contains
     procedure, nopass :: activate2 => a_relu_r !, relu_r
-    procedure, nopass :: derivative => a_d_relu_r, d_relu_r
+    procedure, nopass :: derivative2 => a_d_relu_r, d_relu_r
   end type ReLU
 
   type, extends(Activation) :: softmax
   contains
     procedure, nopass :: activate2 => a_softmax_r
-    procedure, nopass :: derivative => a_d_softmax_r
+    procedure, nopass :: derivative2 => a_d_softmax_r
   end type softmax
+
+  type, extends(Activation) :: softmark
+  contains
+    procedure, nopass :: activate2 => softmark_eval
+    procedure, nopass :: derivative2 => softmark_grad
+  end type softmark
 
   type, abstract, extends(smooth_function) :: Loss
   contains
@@ -69,12 +77,12 @@ module network_utils
 
   abstract interface
     pure elemental function loss_function(compare, desired) result (out)
-      real, intent(in):: compare, desired
+      real, intent(in) :: compare, desired
       real :: out
     end function loss_function
 
     pure elemental function loss_gradient(compare, desired) result (out)
-      real, intent(in):: compare, desired
+      real, intent(in) :: compare, desired
       real :: out
     end function loss_gradient
   end interface
@@ -93,12 +101,53 @@ module network_utils
 
 contains
 
+  pure function softmark_eval(signal) result (out)
+    real, intent(in) :: signal(:,:)
+    real :: out(size(signal,1), size(signal,2)), sq_dk
+    integer :: i
+    out = 0
+    out(1,1) = 1
+    sq_dk = sqrt(size(signal,1)*1.0)
+    do concurrent (i = 2:size(signal,2))
+      out(1:i, i) = exp(signal(1:i, i)/sq_dk) !sqrt(i*1.0))
+      if (.true. .or. sum(out(1:i, i))**(-1) > 0) then
+        out(1:i, i) = out(1:i, i)/sum(out(1:i, i))
+      else
+        out(1:i, i) = signal(1:i, i)/sum(signal(1:i, i))
+      endif
+    end do
+  end function softmark_eval
+
+  pure function softmark_grad(signal) result (out)
+    real, intent(in) :: signal(:,:)
+    real :: out(size(signal,1), size(signal,2)), sq_dk
+    integer :: i
+    out=0
+    ! out(1,1) = 0 !redundant
+    sq_dk = sqrt(size(signal,1)*1.0)
+    do concurrent(i = 2:size(signal,2))
+      out(1:i, i) = exp(signal(1:i, i)/sq_dk) !sqrt(i*1.0))
+      if (.true. .or. sum(out(1:i,i))**(-2) > 0) then
+        out(1:i, i) = out(1:i,i)*(sum(out(1:i,i))-out(1:i,i))/(sum(out(1:i,i))**2)/sq_dk !sqrt(i*1.0)
+      else
+        out(1:i, i) = signal(1:i, i)/sum(signal(1:i, i))
+      endif
+    end do
+  end function softmark_grad
+
   pure function generic_smooth_eval(this, signal) result (out)
     class(Activation), intent(in) :: this
     real, intent(in) :: signal(:)
     real :: out(size(signal))
     out = reshape(this%activate2(reshape(signal, [size(signal),1])), [size(signal)])
   end function generic_smooth_eval
+
+  pure function generic_smooth_deriv(this, signal) result (out)
+    class(Activation), intent(in) :: this
+    real, intent(in) :: signal(:)
+    real :: out(size(signal))
+    out = reshape(this%derivative2(reshape(signal, [size(signal),1])), [size(signal)])
+  end function generic_smooth_deriv
 
   pure elemental function eval_squared_loss(compare, desired) result (out)
     real, intent(in) :: compare, desired
@@ -137,14 +186,14 @@ contains
   end function ident_activate
 
   pure function ident_der(signal) result (out)
-    real, intent(in), dimension (:) :: signal
-    real, dimension(size(signal,1)) :: out
+    real, intent(in):: signal(:,:)
+    real, dimension(size(signal,1),size(signal,2)) :: out
     out = 1.
   end function ident_der
 
   pure function a_d_relu_r(signal) result (out)
-    real, intent(in), dimension (:) :: signal
-    real, dimension(size(signal,1)) :: out
+    real, intent(in) :: signal(:,:)
+    real, dimension(size(signal,1), size(signal,2)) :: out
     out = merge(1.,0.,signal>0)
   end function a_d_relu_r
 
@@ -177,13 +226,12 @@ contains
   end function a_softmax_r
 
   pure function a_d_softmax_r(signal) result (out)
-    real, intent(in), dimension(:) :: signal
-    real, dimension(size(signal)) :: out
-    real :: base(size(signal))
+    real, intent(in) :: signal(:,:)
+    real, dimension(size(signal,1),size(signal,2)) :: out
+    real :: base(size(signal,1), size(signal,2))
     base = exp(signal)
     out = base * (sum(base) - base)/sum(base)**2
   end function a_d_softmax_r
-
 
   pure function one_hot_function(state,max) result (out)
     integer, intent(in) :: state, max

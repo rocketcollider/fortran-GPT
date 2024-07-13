@@ -122,10 +122,13 @@ contains
 
     do i=1,size(this%layers)
       block
-        real :: carrier(this%layers(i)%outputs, size(signals,2))
-        carrier = this%layers(i)%train_forward(out)
+        real, allocatable :: carrier(:,:)!(this%layers(i)%outputs, size(signals,2))
+        !combinde layers result in unpredictable prev_error sizes!
+        allocate(carrier, source = this%layers(i)%train_forward(out))
         deallocate(out)
         allocate(out, source=carrier)
+        !SHOULD be superflous.
+        deallocate(carrier)
       end block
     end do
   end function train_forward2
@@ -138,10 +141,13 @@ contains
 
     do i=size(this%layers),1,-1
       block
-        real :: prev_error(this%layers(i)%inputs, size(errors,2))
-        prev_error = this%layers(i)%train_backward(errors, alpha)
+        real, allocatable :: prev_error(:,:)!(this%layers(i)%inputs, size(errors,2))
+        !combinde layers result in unpredictable prev_error sizes!
+        allocate(prev_error, source = this%layers(i)%train_backward(errors, alpha))
         deallocate(errors)
         allocate(errors, source=prev_error)
+        !SHOULD be superflous.
+        !deallocate(prev_error)
       end block
     end do
   end subroutine train_backward2
